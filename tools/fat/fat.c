@@ -58,10 +58,8 @@ bool readBootSector(FILE* disk) {
 }
 
 bool readSectors(FILE* disk, uint32_t lba, uint32_t count, void* bufferOut) {
-    bool ok = true;
-    ok = ok && (fseek(disk, lba * g_BootSector.BytesPerSector, SEEK_SET) == 0);
-    ok = ok && (fread(bufferOut, g_BootSector.BytesPerSector, count, disk) == count);
-    return ok;
+    return (fseek(disk, lba * g_BootSector.BytesPerSector, SEEK_SET) == 0) &&
+           (fread(bufferOut, g_BootSector.BytesPerSector, count, disk) == count);
 }
 
 bool readFat(FILE* disk) {
@@ -73,9 +71,6 @@ bool readRootDirectory(FILE* disk) {
     uint32_t lba = g_BootSector.ReservedSectors + g_BootSector.FatCount * g_BootSector.SectorsPerFat;
     uint32_t size = g_BootSector.DirEntryCount * sizeof(DirectoryEntry);
     uint32_t sectors = (size / g_BootSector.BytesPerSector) + (size % g_BootSector.BytesPerSector > 0);
-    if (size % g_BootSector.BytesPerSector> 0) {
-        sectors++;
-    }
     g_RootDirectoryEnd = lba + sectors;
     g_RootDirectory = (DirectoryEntry*) malloc(sectors * g_BootSector.BytesPerSector);
     return g_RootDirectory && readSectors(disk, lba, sectors, g_RootDirectory);
@@ -99,21 +94,19 @@ DirectoryEntry* fileEntry(const char* name) {
     return NULL;
 }
 
-bool readFile (DirectoryEntry* fileEntry, FILE* disk, uint8_t outputBuffer) 
-{
+bool readFile(DirectoryEntry* fileEntry, FILE* disk, uint8_t* outputBuffer) {
     bool ok = true;
     uint32_t currentCluster = fileEntry->FirstClusterLow;
     do {
-        uint32_t lba =g_RootDirectoryEnd + (currentCluster - 2) * g_BootSector.SectorsPerCluster;
+        uint32_t lba = g_RootDirectoryEnd + (currentCluster - 2) * g_BootSector.SectorsPerCluster;
         ok = ok && readSectors(disk, lba, g_BootSector.SectorsPerCluster, outputBuffer);
         outputBuffer += g_BootSector.SectorsPerCluster * g_BootSector.BytesPerSector;
-        
-        uint32_t fatIndex = currentCluster * 3/2;
-        if (currentCluster % 2 == 0) 
-        {
-            currentCluster = (*(uint16_t*) &g_Fat + fatIndex) & 0xFFF;	
+
+        uint32_t fatIndex = currentCluster * 3 / 2;
+        if (currentCluster % 2 == 0) {
+            currentCluster = (*(uint16_t*)(g_Fat + fatIndex)) & 0xFFF;
         } else {
-            currentCluster = (*(uint16_t*) &g_Fat + fatIndex) >> 4;
+            currentCluster = (*(uint16_t*)(g_Fat + fatIndex)) >> 4;
         }
     } while (ok && currentCluster < 0xFF8);
     return ok;
@@ -148,22 +141,38 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Error: Unable to read root directory from disk image!\n");
         fclose(disk);
         free(g_Fat);
-        free(g_RootDirectory);
         return -4;
     }
 
     DirectoryEntry* entry = fileEntry(argv[2]);
     if (!entry) {
         fprintf(stderr, "Error: File %s not found!\n", argv[2]);
-        fclose(disk);
         free(g_Fat);
         free(g_RootDirectory);
+        fclose(disk);
         return -5;
     }
+
+    uint8_t* buffer = (uint8_t*) malloc(entry->Size + g_BootSector.BytesPerSector);
+    if (!readFile(entry, disk, buffer)) {
+        fprintf(stderr, "Error: File %s cannot be read!\n", argv[2]);
+        free(buffer);
+        free(g_Fat);
+        free(g_RootDirectory);
+        fclose(disk);
+        return -6;
+    }
+
+    for (size_t i = 0; i < entry->Size; i++) {
+        if (isprint(buffer[i])) fputc(buffer[i], stdout);
+        else printf("<%02x>", buffer[i]);
+    }
+    printf("\n");
 
     printf("File %s found! Size: %u bytes\n", argv[2], entry->Size);
 
     fclose(disk);
+    free(buffer);
     free(g_Fat);
     free(g_RootDirectory);
     return 0;
